@@ -23,9 +23,40 @@ enum PlayerStatus {
     Paused,
 }
 
+struct Location {
+    l: u16,
+    c: u16,
+}
+
+impl Location {
+    fn new(l: u16, c: u16) -> Location {
+        Location { l, c }
+    }
+    fn hit(&self, x: &Location) -> bool {
+        return self.c == x.c && self.l == x.l;
+    }
+}
+
+struct Enemy {
+    location: Location,
+}
+
+struct Bullet {
+    location: Location,
+    energy: u16,
+}
+
+impl Bullet {
+    fn new(world: &World) -> Bullet {
+        Bullet {
+            location: Location::new(world.player_location.l, world.player_location.c),
+            energy: world.maxl / 2,
+        }
+    }
+}
+
 struct World {
-    player_c: u16,
-    player_l: u16,
+    player_location: Location,
     maxc: u16,
     maxl: u16,
     status: PlayerStatus,
@@ -33,20 +64,23 @@ struct World {
     next_right: u16,
     next_left: u16,
     ship: String,
+    enemy: Vec<Enemy>,
+    bullet: Vec<Bullet>,
 }
 
 impl World {
     fn new(maxc: u16, maxl: u16) -> World {
         World {
-            player_c: maxc / 2,
-            player_l: maxl - 1,
+            player_location: Location::new(maxl - 1, maxc / 2),
             map: vec![(maxc / 2 - 5, maxc / 2 + 5); maxl as usize],
             maxc,
             maxl,
             status: PlayerStatus::Alive,
             next_left: maxc / 2 - 7,
             next_right: maxc / 2 + 7,
-            ship: '⛵'.to_string(),
+            ship: "P".to_string(),
+            enemy: vec![],
+            bullet: vec![],
         }
     }
 }
@@ -62,8 +96,22 @@ fn draw(mut sc: &Stdout, world: &World) -> std::io::Result<()> {
             .queue(Print("*".repeat((world.maxc - world.map[l].1) as usize)))?;
     }
 
+    // draw the enemies
+    for enemy in &world.enemy {
+        sc.queue(MoveTo(enemy.location.c, enemy.location.l))?
+            .queue(Print("E"))?
+            .flush()?;
+    }
+
+    // draw bullets
+    for bullet in &world.bullet {
+        sc.queue(MoveTo(bullet.location.c, bullet.location.l))?
+            .queue(Print("^"))?
+            .flush()?;
+    }
+
     // draw the player
-    sc.queue(MoveTo(world.player_c, world.player_l))?
+    sc.queue(MoveTo(world.player_location.c, world.player_location.l))?
         .queue(Print(world.ship.as_str()))?
         .flush()?;
 
@@ -74,10 +122,29 @@ fn physics(world: &mut World) {
     let mut rng = thread_rng();
 
     // check if player has hit the ground
-    if world.player_c <= world.map[world.player_l as usize].0
-        || world.player_c >= world.map[world.player_l as usize].1
+    if world.player_location.c <= world.map[world.player_location.l as usize].0
+        || world.player_location.c >= world.map[world.player_location.l as usize].1
     {
         world.status = PlayerStatus::Dead
+    }
+
+    // check if player has hit an enemy or bullet has hit an enemy
+    for i in (0..world.enemy.len()).rev() {
+        if world.enemy[i].location.c == world.player_location.c
+            && world.enemy[i].location.l == world.player_location.l
+        {
+            world.status = PlayerStatus::Dead
+        }
+        for bullet in &world.bullet {
+            if bullet.location.hit(&world.enemy[i].location)
+                || bullet.location.hit(&Location::new(
+                    world.enemy[i].location.l.saturating_sub(1),
+                    world.enemy[i].location.c,
+                ))
+            {
+                world.enemy.remove(i);
+            }
+        }
     }
 
     // move map downward
@@ -98,6 +165,7 @@ fn physics(world: &mut World) {
         Equal => {}
     };
 
+    // TODO : below rands may go out of range
     if world.next_left == world.map[0].0 && rng.gen_range(0..10) >= 7 {
         world.next_left = rng.gen_range(world.next_left - 5..world.next_left + 5)
     }
@@ -107,6 +175,35 @@ fn physics(world: &mut World) {
 
     if world.next_right.abs_diff(world.next_left) < 3 {
         world.next_right += 3;
+    }
+
+    // move and spawn enemies
+    for i in (0..world.enemy.len()).rev() {
+        if world.enemy[i].location.l < world.maxl {
+            world.enemy[i].location.l += 1;
+        } else {
+            world.enemy.remove(i);
+        }
+    }
+
+    if rng.gen_range(0..10) >= 9 {
+        let new_c = rng.gen_range(world.map[0].0..world.map[1].1);
+        world.enemy.push(Enemy {
+            location: Location::new(0, new_c),
+        })
+    }
+
+    // move bullets and remove once collided or out of screen
+    for i in (0..world.bullet.len()).rev() {
+        if world.bullet[i].energy == 0 || world.bullet[i].location.l < 3 {
+            world.bullet.remove(i);
+        } else {
+            world.bullet[i].location.l -= 2;
+            world.bullet[i].energy -= 1;
+            if world.bullet[i].location.l < 2 {
+                world.bullet[i].energy = 0
+            }
+        }
     }
 }
 
@@ -131,43 +228,48 @@ fn main() -> std::io::Result<()> {
                         match event.code {
                             KeyCode::Char('q') => break,
                             KeyCode::Char('w') => {
-                                if world.player_l > 1 {
-                                    world.player_l -= 1
+                                if world.player_location.l > 1 {
+                                    world.player_location.l -= 1
                                 }
                             }
                             KeyCode::Char('s') => {
-                                if world.player_l < maxl - 1 {
-                                    world.player_l += 1
+                                if world.player_location.l < maxl - 1 {
+                                    world.player_location.l += 1
                                 }
                             }
                             KeyCode::Char('d') => {
-                                if world.player_c < maxc - 1 {
-                                    world.player_c += 1
+                                if world.player_location.c < maxc - 1 {
+                                    world.player_location.c += 1
                                 }
                             }
                             KeyCode::Char('a') => {
-                                if world.player_c > 1 {
-                                    world.player_c -= 1
+                                if world.player_location.c > 1 {
+                                    world.player_location.c -= 1
                                 }
                             }
                             KeyCode::Up => {
-                                if world.player_l > 1 {
-                                    world.player_l -= 1
+                                if world.player_location.l > 1 {
+                                    world.player_location.l -= 1
                                 }
                             }
                             KeyCode::Down => {
-                                if world.player_l < maxl - 1 {
-                                    world.player_l += 1
+                                if world.player_location.l < maxl - 1 {
+                                    world.player_location.l += 1
                                 }
                             }
                             KeyCode::Left => {
-                                if world.player_c > 1 {
-                                    world.player_c -= 1
+                                if world.player_location.c > 1 {
+                                    world.player_location.c -= 1
                                 }
                             }
                             KeyCode::Right => {
-                                if world.player_c < maxc - 1 {
-                                    world.player_c += 1
+                                if world.player_location.c < maxc - 1 {
+                                    world.player_location.c += 1
+                                }
+                            }
+                            KeyCode::Char(' ') => {
+                                if world.bullet.len() == 0 {
+                                    world.bullet.push(Bullet::new(&world))
                                 }
                             }
                             _ => {}
